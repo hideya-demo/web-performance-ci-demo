@@ -1,0 +1,133 @@
+name: Lighthouse Performance
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "site/**"
+
+jobs:
+  lighthouse:
+    name: Lighthouse Performance Comparison
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 20
+
+    env:
+      CHROME_PATH: /usr/bin/google-chrome
+      LCP_BUDGET_PERCENT: 20
+
+    steps:
+      # PR側をcheckout
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+
+      # 比較対象となるmain側をcheckout
+      - name: Checkout main baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
+
+      # Lighthouseなどの依存関係をインストール
+      # PR側のpackage-lock.jsonを使用して測定環境を統一する
+      - name: Install dependencies
+        working-directory: candidate
+        run: npm ci
+
+      # mainとPRをそれぞれ測定
+      - name: Measure main and PR
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+
+          measure() (
+            set -euo pipefail
+
+            SITE_DIR="$1"
+            OUT_DIR="$2"
+            PORT="$3"
+
+            echo ""
+            echo "================================="
+            echo "Measuring: $SITE_DIR"
+            echo "================================="
+
+            python3 -m http.server "$PORT" \
+              --bind 127.0.0.1 \
+              --directory "$SITE_DIR" \
+              > "$RUNNER_TEMP/http-$PORT.log" 2>&1 &
+
+            SERVER_PID=$!
+
+            cleanup() {
+              kill "$SERVER_PID" 2>/dev/null || true
+              wait "$SERVER_PID" 2>/dev/null || true
+            }
+
+            trap cleanup EXIT
+
+            URL="http://127.0.0.1:$PORT"
+
+            echo "Waiting for $URL ..."
+
+            for i in {1..20}; do
+              if curl -fsS "$URL" >/dev/null; then
+                echo "Server ready: $URL"
+                break
+              fi
+
+              sleep 0.5
+            done
+
+            # サーバーが起動できなかった場合はここで失敗させる
+            curl -fsS "$URL" >/dev/null
+
+            ./scripts/measure.sh \
+              "$URL" \
+              "$OUT_DIR" \
+              5
+          )
+
+          echo ""
+          echo "===== Measure main ====="
+
+          measure \
+            "$GITHUB_WORKSPACE/baseline/site" \
+            "./results/baseline" \
+            18001
+
+          echo ""
+          echo "===== Measure PR ====="
+
+          measure \
+            "$GITHUB_WORKSPACE/candidate/site" \
+            "./results/candidate" \
+            18002
+
+      # mainとPRの測定結果を比較
+      # Performance Budget超過時はcompare.jsがexit 1を返す
+      - name: Compare performance
+        working-directory: candidate
+        shell: bash
+        run: |
+          node ./scripts/compare.js \
+            ./results/baseline/summary.json \
+            ./results/candidate/summary.json \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # 成功・失敗にかかわらず生の測定結果を保存
+      - name: Upload Lighthouse results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-results
+          path: candidate/results/
+          if-no-files-found: ignore
+          retention-days: 7
