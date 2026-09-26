@@ -9,5 +9,11 @@
 <body>
   <h1>Web Performance Lab</h1>
   <p>WebPageTestの実験ページです</p>
+  <script>
+    const start = performance.now();
+    // 意図的に1.5秒ブロック
+    while (performance.now() - start < 1500) {
+    }
+  </script>
 </body>
 </html>
